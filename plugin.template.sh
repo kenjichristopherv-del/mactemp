@@ -4,9 +4,13 @@
 # <xbar.version>v1.0</xbar.version>
 # <xbar.author>@AUTHOR@</xbar.author>
 # <xbar.author.github>@GITHUB@</xbar.author.github>
-# <xbar.desc>Apple Silicon thermals: die/SSD/battery temperature plus macOS thermal pressure, with the process causing it. No sudo, no helper daemon.</xbar.desc>
+# <xbar.desc>Apple Silicon thermals: die/SSD/battery temperature plus macOS thermal pressure, and the process causing it. No sudo, no helper daemon, no third-party dependencies.</xbar.desc>
 # <xbar.dependencies>swift</xbar.dependencies>
 # <xbar.abouturl>@ABOUTURL@</xbar.abouturl>
+#
+# <xbar.var>number(VAR_ALERT_MINUTES=5): Minutes of sustained trouble before alerting.</xbar.var>
+# <xbar.var>number(VAR_BATTERY_WARN=45): Battery temperature (C) treated as too hot.</xbar.var>
+# <xbar.var>string(VAR_NOTIFY="both"): Banner delivery — swiftbar, osascript, both, or none.</xbar.var>
 #
 # Reads real hardware sensors through IOKit's HID event system. The sensor
 # reader is Swift, embedded below, compiled once into ~/Library/Caches on first
@@ -25,21 +29,24 @@ BUILDING="$CACHE/building"
 FAILED="$CACHE/build-failed"
 mkdir -p "$CACHE"
 
-# --- thresholds ---------------------------------------------------------------
+# --- settings -----------------------------------------------------------------
 # A fanless Mac is *designed* to run hot and clamp its own clocks, so temperature
 # alone is not a warning signal. Sustained thermal pressure is, because that is
 # macOS saying it is actively giving up speed.
-PRESSURE_SAMPLES=10   # consecutive serious/critical samples before alerting
-BATTERY_WARN=45       # deg C; sustained heat here has a real lifespan cost
-BATTERY_SAMPLES=10
-NOTIFY_COOLDOWN=1800  # seconds between repeat notifications
+#
+# Thresholds are measured in elapsed seconds rather than sample counts, so
+# changing the refresh rate in the filename does not silently change them.
+ALERT_MINUTES="${VAR_ALERT_MINUTES:-5}"
+BATTERY_WARN="${VAR_BATTERY_WARN:-45}"
+ALERT_SECONDS=$(( ALERT_MINUTES * 60 ))
+NOTIFY_COOLDOWN=1800   # seconds between repeat banners
 
 # Banner notifications need a permission macOS may not have granted, and a
 # plugin cannot detect delivery failure. They are therefore the *secondary*
 # channel — the menubar title always shouts, and that needs no permission.
 #   swiftbar  - SwiftBar's own banner    osascript - via Script Editor
 #   both | none
-NOTIFY_METHOD="both"
+NOTIFY_METHOD="${VAR_NOTIFY:-both}"
 
 render_bar() { echo "$1"; echo "---"; shift; printf '%s\n' "$@"; exit 0; }
 # Something is wrong and needs attention.
@@ -70,7 +77,7 @@ if [ ! -x "$BIN" ]; then
   if [ -f "$BUILDING" ]; then
     if [ "$(age_of "$BUILDING")" -lt 300 ]; then
       busy "Building sensor reader…" "First run only. This takes a few seconds." \
-          "Check again | refresh=true"
+           "Check again | refresh=true"
     fi
     rm -f "$BUILDING"
   fi
@@ -102,7 +109,7 @@ SWIFT_SOURCE_EOF
   " >/dev/null 2>&1 &
 
   busy "Building sensor reader…" "First run only. This takes a few seconds." \
-      "Check again | refresh=true"
+       "Check again | refresh=true"
 fi
 
 JSON="$("$BIN" 2>/dev/null)"
@@ -116,23 +123,35 @@ STORAGE="$(field storage)"
 SENSORS="$(field sensors)"
 STATE_NAME="$(echo "$JSON" | sed -n 's/.*"thermal_state":"\([a-z]*\)".*/\1/p')"
 
-# --- sustained-pressure tracking ---------------------------------------------
-PRESSURE_STREAK=0; BATTERY_STREAK=0; LAST_NOTIFY=0
+# --- how long has it been like this? -----------------------------------------
+# Timestamps, not counters: 0 means "not currently in this condition", otherwise
+# it is when the condition began.
+PRESSURE_SINCE=0; BATTERY_SINCE=0; LAST_NOTIFY=0
 # shellcheck disable=SC1090
 [ -f "$STATE" ] && . "$STATE"
+NOW="$(date +%s)"
 
 case "$STATE_NAME" in
-  serious|critical) PRESSURE_STREAK=$((PRESSURE_STREAK + 1)) ;;
-  *)                PRESSURE_STREAK=0 ;;
+  serious|critical) [ "$PRESSURE_SINCE" -eq 0 ] && PRESSURE_SINCE="$NOW" ;;
+  *)                PRESSURE_SINCE=0 ;;
 esac
 
 if [ -n "$BATTERY" ] && [ "${BATTERY%.*}" -ge "$BATTERY_WARN" ] 2>/dev/null; then
-  BATTERY_STREAK=$((BATTERY_STREAK + 1))
+  [ "$BATTERY_SINCE" -eq 0 ] && BATTERY_SINCE="$NOW"
 else
-  BATTERY_STREAK=0
+  BATTERY_SINCE=0
 fi
 
-NOW="$(date +%s)"
+held_for() { # since -> seconds held, 0 if not currently held
+  [ "$1" -eq 0 ] && { echo 0; return; }
+  echo $(( NOW - $1 ))
+}
+PRESSURE_HELD="$(held_for "$PRESSURE_SINCE")"
+BATTERY_HELD="$(held_for "$BATTERY_SINCE")"
+
+pressure_alert() { [ "$PRESSURE_SINCE" -ne 0 ] && [ "$PRESSURE_HELD" -ge "$ALERT_SECONDS" ]; }
+battery_alert()  { [ "$BATTERY_SINCE"  -ne 0 ] && [ "$BATTERY_HELD"  -ge "$ALERT_SECONDS" ]; }
+
 PLUGIN="$(basename "$0")"   # SwiftBar's plugin id is the full filename
 
 notify() { # title, body
@@ -149,15 +168,15 @@ notify() { # title, body
 }
 
 if [ $((NOW - LAST_NOTIFY)) -ge "$NOTIFY_COOLDOWN" ]; then
-  if [ "$PRESSURE_STREAK" -ge "$PRESSURE_SAMPLES" ]; then
+  if pressure_alert; then
     notify "Mac is throttling" "Sustained thermal pressure - expect things to feel slow. Check what is running."
-  elif [ "$BATTERY_STREAK" -ge "$BATTERY_SAMPLES" ]; then
+  elif battery_alert; then
     notify "Battery is running hot" "${BATTERY}C sustained. Unplug or move it off soft surfaces."
   fi
 fi
 
-printf 'PRESSURE_STREAK=%s\nBATTERY_STREAK=%s\nLAST_NOTIFY=%s\n' \
-  "$PRESSURE_STREAK" "$BATTERY_STREAK" "$LAST_NOTIFY" > "$STATE"
+printf 'PRESSURE_SINCE=%s\nBATTERY_SINCE=%s\nLAST_NOTIFY=%s\n' \
+  "$PRESSURE_SINCE" "$BATTERY_SINCE" "$LAST_NOTIFY" > "$STATE"
 
 # --- render -------------------------------------------------------------------
 case "$STATE_NAME" in
@@ -171,10 +190,10 @@ esac
 # The always-works alert channel: once something has been wrong long enough to
 # be worth saying, the menubar stops being a quiet number and says it in words.
 LABEL="${DIE_MAX:+${DIE_MAX%.*}°}"
-LABEL="${LABEL:-$STATE_NAME}"
-if [ "$PRESSURE_STREAK" -ge "$PRESSURE_SAMPLES" ]; then
+LABEL="${LABEL:-${STATE_NAME:-thermals}}"
+if pressure_alert; then
   echo "$LABEL throttling | sfimage=thermometer.high color=#ff453a"
-elif [ "$BATTERY_STREAK" -ge "$BATTERY_SAMPLES" ]; then
+elif battery_alert; then
   echo "$LABEL battery hot | sfimage=thermometer.high color=#ff9f0a"
 else
   echo "$LABEL | sfimage=$ICON $COLOR"
@@ -182,6 +201,7 @@ fi
 echo "---"
 echo "Thermal pressure: ${STATE_NAME:-unknown} | sfimage=$ICON $COLOR"
 echo "$PLAIN | size=11 color=#8e8e93"
+[ "$PRESSURE_SINCE" -ne 0 ] && echo "Held for $((PRESSURE_HELD / 60))m $((PRESSURE_HELD % 60))s | size=11 color=#8e8e93"
 echo "---"
 if [ -n "$DIE_MAX" ]; then
   echo "SoC die (hottest)  ${DIE_MAX}°C | font=Menlo size=12"

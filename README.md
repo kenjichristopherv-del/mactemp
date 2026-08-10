@@ -42,15 +42,28 @@ SwiftBar to be allowed in System Settings › Notifications; the `osascript` pat
 goes through Script Editor instead. A plugin cannot detect a banner that failed
 to deliver, which is exactly why the menubar carries the real signal.
 
-Alerts fire only after:
+Alerts fire only after a condition has been **continuously held for 5 minutes**:
 
-- **10 consecutive** `serious`/`critical` samples (5 minutes at the default 30s
-  refresh) — not on a spike, not on a compile.
-- Battery at **45 °C+** for the same duration. This is the one sensor where
-  sustained heat has a genuine lifespan cost, and where "unplug it, get it off
-  the blanket" is real advice.
+- Thermal pressure at `serious`/`critical` — not on a spike, not on a compile.
+- Battery at **45 °C+**. This is the one sensor where sustained heat has a
+  genuine lifespan cost, and where "unplug it, get it off the blanket" is real
+  advice.
+
+Duration is measured in elapsed seconds, not sample counts, so changing the
+refresh rate in the filename does not silently change the thresholds.
 
 Repeats are rate-limited to once per 30 minutes.
+
+## Preferences
+
+Exposed as `xbar.var` entries, so they are editable in the app's plugin
+settings rather than by hand:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VAR_ALERT_MINUTES` | `5` | Minutes of sustained trouble before alerting |
+| `VAR_BATTERY_WARN` | `45` | Battery temperature (°C) treated as too hot |
+| `VAR_NOTIFY` | `both` | Banner delivery: `swiftbar`, `osascript`, `both`, `none` |
 
 ## Install
 
