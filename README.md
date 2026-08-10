@@ -7,7 +7,8 @@ Monitor uses.
 
 ```
 68°                 ← normal
-68° throttling      ← red; sustained thermal pressure
+97° throttling      ← red; sustained thermal pressure
+97° hot             ← amber; sustained 95 °C+
 68° battery hot     ← amber; sustained 45 °C+
 ```
 
@@ -15,8 +16,10 @@ Monitor uses.
 
 Not *"is my Mac in danger?"* — on a fanless Mac it essentially never is. The SoC
 is designed to run hot and clamp its own clocks, and there is no wear mechanism
-you can trigger by working it hard. A temperature-threshold alarm would fire
-constantly on a healthy machine and get ignored within a week.
+you can trigger by working it hard. An *instantaneous* temperature alarm would
+fire on every compile and get ignored within a week, which is why the high-temp
+warning here requires the reading to be sustained, and why it arrives with a
+named culprit instead of just a number.
 
 It answers ***"why is my Mac slow right now?"***, which on a fanless machine is
 a real and frequent thing:
