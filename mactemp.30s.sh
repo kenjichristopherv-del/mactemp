@@ -68,11 +68,26 @@ else
 fi
 
 NOW="$(date +%s)"
-PLUGIN="$(basename "$0" | cut -d. -f1)"
+PLUGIN="$(basename "$0")"   # SwiftBar's plugin id is the full filename
+
+# Banner notifications need permission macOS may not have granted, and there is
+# no way to detect delivery failure from here. So they are the *secondary*
+# channel — the menubar title below always shouts, and that needs no permission.
+#   swiftbar  - SwiftBar's own banner (System Settings > Notifications > SwiftBar)
+#   osascript - posted via Script Editor (System Settings > Notifications > Script Editor)
+#   both | none
+NOTIFY_METHOD="both"
 
 notify() { # title, body
-  local title="${1// /%20}" body="${2// /%20}"
-  open "swiftbar://notify?plugin=${PLUGIN}&title=${title}&body=${body}" 2>/dev/null
+  local title="$1" body="$2"
+  case "$NOTIFY_METHOD" in
+    swiftbar|both)
+      open "swiftbar://notify?plugin=${PLUGIN}&title=${title// /%20}&body=${body// /%20}" 2>/dev/null ;;
+  esac
+  case "$NOTIFY_METHOD" in
+    osascript|both)
+      osascript -e "display notification \"$body\" with title \"$title\"" >/dev/null 2>&1 ;;
+  esac
   LAST_NOTIFY="$NOW"
 }
 
@@ -96,7 +111,15 @@ case "$STATE_NAME" in
   *)        COLOR=""; ICON="thermometer.medium"; PLAIN="Unknown thermal state." ;;
 esac
 
-echo "${DIE_MAX%.*}° | sfimage=$ICON $COLOR"
+# The always-works alert channel: once something has been wrong long enough to
+# be worth saying, the menubar stops being a quiet number and says it in words.
+if [ "$PRESSURE_STREAK" -ge "$PRESSURE_SAMPLES" ]; then
+  echo "${DIE_MAX%.*}° throttling | sfimage=thermometer.high color=#ff453a"
+elif [ "$BATTERY_STREAK" -ge "$BATTERY_SAMPLES" ]; then
+  echo "${DIE_MAX%.*}° battery hot | sfimage=thermometer.high color=#ff9f0a"
+else
+  echo "${DIE_MAX%.*}° | sfimage=$ICON $COLOR"
+fi
 echo "---"
 echo "Thermal pressure: ${STATE_NAME} | sfimage=$ICON $COLOR"
 echo "$PLAIN | size=11 color=#8e8e93"
