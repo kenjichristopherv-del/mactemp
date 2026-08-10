@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #
 # <xbar.title>mactemp</xbar.title>
-# <xbar.version>v1.0</xbar.version>
+# <xbar.version>v1.1</xbar.version>
 # <xbar.author>Kenji Tubera</xbar.author>
 # <xbar.author.github>kenjichristopherv-del</xbar.author.github>
-# <xbar.desc>Apple Silicon thermals: die/SSD/battery temperature plus macOS thermal pressure, and the process causing it. No sudo, no helper daemon, no third-party dependencies.</xbar.desc>
+# <xbar.desc>Apple Silicon thermals: die/SSD/battery temperature plus macOS thermal pressure, and the process causing it. Warns with a suggested action when it runs hot. No sudo, no helper daemon, no third-party dependencies.</xbar.desc>
 # <xbar.dependencies>swift</xbar.dependencies>
 # <xbar.abouturl>https://github.com/kenjichristopherv-del/mactemp</xbar.abouturl>
 #
 # <xbar.var>number(VAR_ALERT_MINUTES=5): Minutes of sustained trouble before alerting.</xbar.var>
+# <xbar.var>number(VAR_HOT_WARN=95): SoC temperature (C) treated as running hot.</xbar.var>
 # <xbar.var>number(VAR_BATTERY_WARN=45): Battery temperature (C) treated as too hot.</xbar.var>
 # <xbar.var>string(VAR_NOTIFY="both"): Banner delivery — swiftbar, osascript, both, or none.</xbar.var>
 #
@@ -30,13 +31,13 @@ FAILED="$CACHE/build-failed"
 mkdir -p "$CACHE"
 
 # --- settings -----------------------------------------------------------------
-# A fanless Mac is *designed* to run hot and clamp its own clocks, so temperature
-# alone is not a warning signal. Sustained thermal pressure is, because that is
-# macOS saying it is actively giving up speed.
-#
-# Thresholds are measured in elapsed seconds rather than sample counts, so
-# changing the refresh rate in the filename does not silently change them.
+# A fanless Mac is *designed* to run hot and clamp its own clocks, so a brief
+# high reading is not a fault. Every alert here therefore requires the condition
+# to be *sustained*, and thresholds are measured in elapsed seconds rather than
+# sample counts, so changing the refresh rate in the filename does not silently
+# change them.
 ALERT_MINUTES="${VAR_ALERT_MINUTES:-5}"
+HOT_WARN="${VAR_HOT_WARN:-95}"
 BATTERY_WARN="${VAR_BATTERY_WARN:-45}"
 ALERT_SECONDS=$(( ALERT_MINUTES * 60 ))
 NOTIFY_COOLDOWN=1800   # seconds between repeat banners
@@ -230,11 +231,18 @@ BATTERY="$(field battery)"
 STORAGE="$(field storage)"
 SENSORS="$(field sensors)"
 STATE_NAME="$(echo "$JSON" | sed -n 's/.*"thermal_state":"\([a-z]*\)".*/\1/p')"
+DIE_INT="${DIE_MAX%.*}"; DIE_INT="${DIE_INT:-0}"
+BATT_INT="${BATTERY%.*}"; BATT_INT="${BATT_INT:-0}"
+
+# Read the process table once; both the warning text and the menu use it.
+TOP_LINES="$(ps -Ao %cpu,comm -r 2>/dev/null | sed -n '2,4p')"
+TOP_PCT="$(echo "$TOP_LINES" | sed -n 1p | awk '{print $1}')"
+TOP_PROC="$(basename "$(echo "$TOP_LINES" | sed -n 1p | sed 's/^ *[0-9.]* *//')" 2>/dev/null)"
 
 # --- how long has it been like this? -----------------------------------------
 # Timestamps, not counters: 0 means "not currently in this condition", otherwise
 # it is when the condition began.
-PRESSURE_SINCE=0; BATTERY_SINCE=0; LAST_NOTIFY=0
+PRESSURE_SINCE=0; HOT_SINCE=0; BATTERY_SINCE=0; LAST_NOTIFY=0
 # shellcheck disable=SC1090
 [ -f "$STATE" ] && . "$STATE"
 NOW="$(date +%s)"
@@ -243,8 +251,12 @@ case "$STATE_NAME" in
   serious|critical) [ "$PRESSURE_SINCE" -eq 0 ] && PRESSURE_SINCE="$NOW" ;;
   *)                PRESSURE_SINCE=0 ;;
 esac
-
-if [ -n "$BATTERY" ] && [ "${BATTERY%.*}" -ge "$BATTERY_WARN" ] 2>/dev/null; then
+if [ "$DIE_INT" -ge "$HOT_WARN" ]; then
+  [ "$HOT_SINCE" -eq 0 ] && HOT_SINCE="$NOW"
+else
+  HOT_SINCE=0
+fi
+if [ -n "$BATTERY" ] && [ "$BATT_INT" -ge "$BATTERY_WARN" ]; then
   [ "$BATTERY_SINCE" -eq 0 ] && BATTERY_SINCE="$NOW"
 else
   BATTERY_SINCE=0
@@ -255,36 +267,81 @@ held_for() { # since -> seconds held, 0 if not currently held
   echo $(( NOW - $1 ))
 }
 PRESSURE_HELD="$(held_for "$PRESSURE_SINCE")"
+HOT_HELD="$(held_for "$HOT_SINCE")"
 BATTERY_HELD="$(held_for "$BATTERY_SINCE")"
 
-pressure_alert() { [ "$PRESSURE_SINCE" -ne 0 ] && [ "$PRESSURE_HELD" -ge "$ALERT_SECONDS" ]; }
-battery_alert()  { [ "$BATTERY_SINCE"  -ne 0 ] && [ "$BATTERY_HELD"  -ge "$ALERT_SECONDS" ]; }
+sustained() { # since, held -> true once held past the alert threshold
+  [ "$1" -ne 0 ] && [ "$2" -ge "$ALERT_SECONDS" ]
+}
+pressure_alert() { sustained "$PRESSURE_SINCE" "$PRESSURE_HELD"; }
+hot_alert()      { sustained "$HOT_SINCE"      "$HOT_HELD"; }
+battery_alert()  { sustained "$BATTERY_SINCE"  "$BATTERY_HELD"; }
+
+# --- what to actually do about it ---------------------------------------------
+# The most useful suggestion names the culprit, so the advice is checkable
+# rather than generic. Falls back to placement advice when nothing dominates.
+suggested_action() {
+  local pct="${TOP_PCT:-0}"
+  if [ "${pct%.*}" -ge 50 ] 2>/dev/null && [ -n "$TOP_PROC" ]; then
+    echo "$TOP_PROC is using ${pct}% CPU - quit it if you don't need it."
+  elif pmset -g batt 2>/dev/null | grep -q "AC Power"; then
+    echo "Nothing is dominating the CPU. Unplug if you can, and move it off soft surfaces."
+  else
+    echo "Nothing is dominating the CPU. Move it off soft surfaces and out of direct sun."
+  fi
+}
 
 PLUGIN="$(basename "$0")"   # SwiftBar's plugin id is the full filename
 
+# Percent-encode for the swiftbar:// URL. Done byte-wise under LC_ALL=C so
+# multi-byte process names encode correctly instead of being mangled.
+urlenc() {
+  local LC_ALL=C s="$1" out="" c i n
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out+="$c" ;;
+      # Mask to a byte: bytes >= 0x80 arrive as negative signed chars and would
+      # otherwise sign-extend into %FFFFFFFFFFFFFFC3.
+      *) printf -v n '%d' "'$c"; out+="$(printf '%%%02X' $(( n & 0xFF )))" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 notify() { # title, body
-  local title="$1" body="$2"
+  local title="$1" body="$2" esc
   case "$NOTIFY_METHOD" in
     swiftbar|both)
-      open "swiftbar://notify?plugin=${PLUGIN}&title=${title// /%20}&body=${body// /%20}" 2>/dev/null ;;
+      open "swiftbar://notify?plugin=$(urlenc "$PLUGIN")&title=$(urlenc "$title")&body=$(urlenc "$body")" 2>/dev/null ;;
   esac
   case "$NOTIFY_METHOD" in
     osascript|both)
-      osascript -e "display notification \"$body\" with title \"$title\"" >/dev/null 2>&1 ;;
+      # A process name containing a quote or backslash would otherwise break out
+      # of the AppleScript string literal.
+      esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+      osascript -e "display notification \"$(esc "$body")\" with title \"$(esc "$title")\"" >/dev/null 2>&1 ;;
   esac
   LAST_NOTIFY="$NOW"
 }
 
+# One banner at a time, most informative first: throttling explains a slowdown,
+# a hot chip explains why throttling is coming, battery heat is its own concern.
 if [ $((NOW - LAST_NOTIFY)) -ge "$NOTIFY_COOLDOWN" ]; then
   if pressure_alert; then
-    notify "Mac is throttling" "Sustained thermal pressure - expect things to feel slow. Check what is running."
+    notify "Mac is throttling (${DIE_INT}C)" \
+           "Speed is being cut to shed heat. $(suggested_action)"
+  elif hot_alert; then
+    notify "Mac running hot (${DIE_INT}C)" \
+           "Held above ${HOT_WARN}C for $((HOT_HELD / 60)) min. $(suggested_action)"
   elif battery_alert; then
-    notify "Battery is running hot" "${BATTERY}C sustained. Unplug or move it off soft surfaces."
+    notify "Battery running hot (${BATT_INT}C)" \
+           "Sustained battery heat shortens its life. Unplug and move it off soft surfaces."
   fi
 fi
 
-printf 'PRESSURE_SINCE=%s\nBATTERY_SINCE=%s\nLAST_NOTIFY=%s\n' \
-  "$PRESSURE_SINCE" "$BATTERY_SINCE" "$LAST_NOTIFY" > "$STATE"
+printf 'PRESSURE_SINCE=%s\nHOT_SINCE=%s\nBATTERY_SINCE=%s\nLAST_NOTIFY=%s\n' \
+  "$PRESSURE_SINCE" "$HOT_SINCE" "$BATTERY_SINCE" "$LAST_NOTIFY" > "$STATE"
 
 # --- what the number means ----------------------------------------------------
 # Apple publishes no Tjmax, so these bands come from measured behaviour on
@@ -312,10 +369,12 @@ esac
 
 # The always-works alert channel: once something has been wrong long enough to
 # be worth saying, the menubar stops being a quiet number and says it in words.
-LABEL="${DIE_MAX:+${DIE_MAX%.*}°}"
+LABEL="${DIE_MAX:+${DIE_INT}°}"
 LABEL="${LABEL:-${STATE_NAME:-thermals}}"
 if pressure_alert; then
   echo "$LABEL throttling | sfimage=thermometer.high color=#ff453a"
+elif hot_alert; then
+  echo "$LABEL hot | sfimage=thermometer.high color=#ff9f0a"
 elif battery_alert; then
   echo "$LABEL battery hot | sfimage=thermometer.high color=#ff9f0a"
 else
@@ -329,36 +388,33 @@ echo "---"
 if [ -n "$DIE_MAX" ]; then
   echo "SoC die (hottest)  ${DIE_MAX}°C | font=Menlo size=12"
   echo "SoC die (average)  ${DIE_AVG}°C | font=Menlo size=12"
-  echo "$(describe_temp "${DIE_MAX%.*}") | size=11 color=#8e8e93"
+  echo "$(describe_temp "$DIE_INT") | size=11 color=#8e8e93"
 else
   echo "No SoC die sensors exposed on this Mac | size=11 color=#8e8e93"
 fi
 [ -n "$STORAGE" ] && echo "SSD                ${STORAGE}°C | font=Menlo size=12"
 if [ -n "$BATTERY" ]; then
   BCOL=""
-  [ "${BATTERY%.*}" -ge "$BATTERY_WARN" ] 2>/dev/null && BCOL="color=#ff9f0a"
+  [ "$BATT_INT" -ge "$BATTERY_WARN" ] && BCOL="color=#ff9f0a"
   echo "Battery            ${BATTERY}°C | font=Menlo size=12 $BCOL"
 fi
+
 # --- what to do about it ------------------------------------------------------
 # Shown only when there is genuinely something to act on, and tailored to the
 # actual condition rather than printing a generic checklist every refresh.
-HOT_DIE=0
-[ -n "$DIE_MAX" ] && [ "${DIE_MAX%.*}" -ge 91 ] 2>/dev/null && HOT_DIE=1
 if [ "$STATE_NAME" = "serious" ] || [ "$STATE_NAME" = "critical" ] ||
-   [ "$HOT_DIE" -eq 1 ] || [ "$BATTERY_SINCE" -ne 0 ]; then
+   [ "$DIE_INT" -ge 91 ] || [ "$BATTERY_SINCE" -ne 0 ]; then
   echo "---"
   echo "What to do"
-  echo "Quit the top process below if you don't need it | size=11"
+  echo "$(suggested_action) | size=11"
   echo "Get it off fabric — the chassis is the heatsink | size=11"
-  if pmset -g batt 2>/dev/null | grep -q "AC Power"; then
-    echo "Unplug if you can — charging adds its own heat | size=11"
-  fi
   echo "Rooms above 35°C are outside Apple's spec | size=11"
   echo "None of this risks damage — the chip throttles to protect itself | size=11 color=#8e8e93"
 fi
 echo "---"
 echo "Top CPU right now"
-ps -Ao %cpu,comm -r 2>/dev/null | sed -n '2,4p' | while read -r pct cmd; do
+echo "$TOP_LINES" | while read -r pct cmd; do
+  [ -z "$pct" ] && continue
   echo "$(printf '%5s%%' "$pct")  $(basename "$cmd") | font=Menlo size=12"
 done
 echo "---"

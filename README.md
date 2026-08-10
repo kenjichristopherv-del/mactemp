@@ -45,9 +45,21 @@ to deliver, which is exactly why the menubar carries the real signal.
 Alerts fire only after a condition has been **continuously held for 5 minutes**:
 
 - Thermal pressure at `serious`/`critical` — not on a spike, not on a compile.
+- SoC die at **95 °C+** — running hot, approaching the throttle point.
 - Battery at **45 °C+**. This is the one sensor where sustained heat has a
   genuine lifespan cost, and where "unplug it, get it off the blanket" is real
   advice.
+
+One banner at a time, most informative first. Each carries a **suggested
+action**, and the suggestion names the actual culprit rather than reciting a
+checklist:
+
+> **Mac running hot (97C)**
+> Held above 95C for 6 min. Final Cut Pro is using 188.4% CPU - quit it if you
+> don't need it.
+
+When nothing dominates the CPU the advice falls back to placement, and mentions
+unplugging only when actually on AC power.
 
 Duration is measured in elapsed seconds, not sample counts, so changing the
 refresh rate in the filename does not silently change the thresholds.
@@ -88,6 +100,7 @@ settings rather than by hand:
 | Variable | Default | Meaning |
 |---|---|---|
 | `VAR_ALERT_MINUTES` | `5` | Minutes of sustained trouble before alerting |
+| `VAR_HOT_WARN` | `95` | SoC temperature (°C) treated as running hot |
 | `VAR_BATTERY_WARN` | `45` | Battery temperature (°C) treated as too hot |
 | `VAR_NOTIFY` | `both` | Banner delivery: `swiftbar`, `osascript`, `both`, `none` |
 
