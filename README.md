@@ -54,6 +54,32 @@ refresh rate in the filename does not silently change the thresholds.
 
 Repeats are rate-limited to once per 30 minutes.
 
+## What counts as normal
+
+Apple publishes no Tjmax for Apple Silicon, so these bands come from measured
+behaviour rather than a datasheet. The plugin labels the current reading against
+them.
+
+| SoC die | Meaning |
+|---|---|
+| 30–45 °C | Idle. Nothing working hard. |
+| 46–70 °C | Normal working range. |
+| 71–90 °C | Heavy sustained load. Expected, and safe by design. |
+| 91–99 °C | Very hot, near the throttle point. Still within design limits. |
+| 100 °C+ | At the throttle ceiling. The chip is protecting itself. |
+
+For scale: a fanless M3 MacBook Air has been measured **peaking at 114 °C** on
+its hottest core under a stress test, settling near 100 °C once throttling
+engaged. It did not fail, and it was not damaged — that is the cooling strategy
+working. Throttling is reversible and by design.
+
+**Ambient temperature is the number with a real limit.** Apple specifies
+**10–35 °C** operating ambient for MacBooks, an ideal of 16–22 °C, and warns
+that exposure above **35 °C ambient can permanently damage battery capacity**.
+So the room matters more than the die reading — which is why this plugin tracks
+battery temperature separately and says something about it, and why the "what to
+do" advice mentions the room rather than telling you to stop working.
+
 ## Preferences
 
 Exposed as `xbar.var` entries, so they are editable in the app's plugin

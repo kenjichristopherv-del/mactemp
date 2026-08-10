@@ -178,6 +178,21 @@ fi
 printf 'PRESSURE_SINCE=%s\nBATTERY_SINCE=%s\nLAST_NOTIFY=%s\n' \
   "$PRESSURE_SINCE" "$BATTERY_SINCE" "$LAST_NOTIFY" > "$STATE"
 
+# --- what the number means ----------------------------------------------------
+# Apple publishes no Tjmax, so these bands come from measured behaviour on
+# Apple Silicon: idle sits in the 30s, ordinary work in the 50s-60s, sustained
+# load in the 70s-80s, and throttling begins around 95-100. A fanless M3 Air has
+# been measured peaking at 114 on the hottest core and settling near 100 once
+# throttling engages — so a high number alone is not a fault.
+describe_temp() { # integer celsius
+  if   [ "$1" -lt 46 ]; then echo "Idle-cool. Nothing is working hard."
+  elif [ "$1" -lt 71 ]; then echo "Normal working range."
+  elif [ "$1" -lt 91 ]; then echo "Heavy load — expected, and safe by design."
+  elif [ "$1" -lt 100 ]; then echo "Very hot, near the throttle point. Still within design limits."
+  else echo "At the throttle ceiling. The chip is protecting itself."
+  fi
+}
+
 # --- render -------------------------------------------------------------------
 case "$STATE_NAME" in
   nominal)  COLOR=""; ICON="thermometer.low";    PLAIN="Running free. No clocks are being held back." ;;
@@ -206,6 +221,7 @@ echo "---"
 if [ -n "$DIE_MAX" ]; then
   echo "SoC die (hottest)  ${DIE_MAX}°C | font=Menlo size=12"
   echo "SoC die (average)  ${DIE_AVG}°C | font=Menlo size=12"
+  echo "$(describe_temp "${DIE_MAX%.*}") | size=11 color=#8e8e93"
 else
   echo "No SoC die sensors exposed on this Mac | size=11 color=#8e8e93"
 fi
@@ -214,6 +230,23 @@ if [ -n "$BATTERY" ]; then
   BCOL=""
   [ "${BATTERY%.*}" -ge "$BATTERY_WARN" ] 2>/dev/null && BCOL="color=#ff9f0a"
   echo "Battery            ${BATTERY}°C | font=Menlo size=12 $BCOL"
+fi
+# --- what to do about it ------------------------------------------------------
+# Shown only when there is genuinely something to act on, and tailored to the
+# actual condition rather than printing a generic checklist every refresh.
+HOT_DIE=0
+[ -n "$DIE_MAX" ] && [ "${DIE_MAX%.*}" -ge 91 ] 2>/dev/null && HOT_DIE=1
+if [ "$STATE_NAME" = "serious" ] || [ "$STATE_NAME" = "critical" ] ||
+   [ "$HOT_DIE" -eq 1 ] || [ "$BATTERY_SINCE" -ne 0 ]; then
+  echo "---"
+  echo "What to do"
+  echo "Quit the top process below if you don't need it | size=11"
+  echo "Get it off fabric — the chassis is the heatsink | size=11"
+  if pmset -g batt 2>/dev/null | grep -q "AC Power"; then
+    echo "Unplug if you can — charging adds its own heat | size=11"
+  fi
+  echo "Rooms above 35°C are outside Apple's spec | size=11"
+  echo "None of this risks damage — the chip throttles to protect itself | size=11 color=#8e8e93"
 fi
 echo "---"
 echo "Top CPU right now"
